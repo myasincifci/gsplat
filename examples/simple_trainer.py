@@ -13,29 +13,32 @@ from PIL import Image
 from torch import Tensor, optim
 
 from utils import readCamerasFromTransforms
+from random import randint
+import copy
 
 class SimpleTrainer:
     """Trains random gaussians to fit an image."""
 
     def __init__(
         self,
-        gt_image: Tensor,
-        fov_x,
-        W,
-        H,
-        viewmat,
+        cameras,
         num_points: int = 2000,
     ):
+        self.cameras = cameras
+
         self.device = torch.device("cuda:0")
-        self.gt_image = gt_image.to(device=self.device)
+        # self.gt_image = gt_image.to(device=self.device)
         self.num_points = num_points
 
-        fov_x = fov_x # math.pi / 2.0
-        self.H, self.W = H, W # gt_image.shape[0], gt_image.shape[1]
-        self.focal = 0.5 * float(self.W) / math.tan(0.5 * fov_x)
-        self.img_size = torch.tensor([self.W, self.H, 1], device=self.device)
+        self.yxz_grad_accum = None
+        self.grad_denom = 0
 
-        self.viewmat = viewmat
+        # fov_x = fov_x # math.pi / 2.0
+        # self.H, self.W = H, W # gt_image.shape[0], gt_image.shape[1]
+        # self.focal = 0.5 * float(self.W) / math.tan(0.5 * fov_x)
+        # self.img_size = torch.tensor([self.W, self.H, 1], device=self.device)
+
+        # self.viewmat = viewmat
 
         self._init_gaussians()
 
@@ -62,6 +65,7 @@ class SimpleTrainer:
             ],
             -1,
         )
+        self.quats = self.quats.to(device=self.device)
         self.opacities = torch.ones((self.num_points, 1), device=self.device)
 
         # self.viewmat = torch.tensor(
@@ -73,7 +77,7 @@ class SimpleTrainer:
         #     ],
         #     device=self.device,
         # )
-        self.viewmat = self.viewmat.to(self.device)
+        # self.viewmat = self.viewmat.to(self.device)
         self.background = torch.zeros(d, device=self.device)
 
         self.means.requires_grad = True
@@ -81,7 +85,7 @@ class SimpleTrainer:
         self.quats.requires_grad = True
         self.rgbs.requires_grad = True
         self.opacities.requires_grad = True
-        self.viewmat.requires_grad = False
+        # self.viewmat.requires_grad = False
 
     def train(
         self,
@@ -90,7 +94,7 @@ class SimpleTrainer:
         save_imgs: bool = False,
         B_SIZE: int = 14,
     ):
-        optimizer = optim.Adam(
+        optimizer = optim.AdamW(
             [self.rgbs, self.means, self.scales, self.opacities, self.quats], lr
         )
         mse_loss = torch.nn.MSELoss()
@@ -98,6 +102,16 @@ class SimpleTrainer:
         times = [0] * 3  # project, rasterize, backward
         B_SIZE = 16
         for iter in range(iterations):
+            idx = randint(1, len(self.cameras)) - 1
+            camera = copy.copy(self.cameras[idx])
+
+            viewmat = torch.from_numpy(camera.w2c).to(dtype=torch.float).to(self.device)
+            fov_x = camera.FovX
+            W = camera.width
+            H = camera.height
+            gt_image = image_path_to_tensor(camera.image_path).to(self.device)
+            focal = 0.5 * float(W) / math.tan(0.5 * fov_x)
+
             start = time.time()
             (
                 xys,
@@ -112,13 +126,13 @@ class SimpleTrainer:
                 self.scales,
                 1,
                 self.quats / self.quats.norm(dim=-1, keepdim=True),
-                self.viewmat,
-                self.focal,
-                self.focal,
-                self.W / 2,
-                self.H / 2,
-                self.H,
-                self.W,
+                viewmat,
+                focal,
+                focal,
+                W / 2,
+                H / 2,
+                H,
+                W,
                 B_SIZE,
             )
             torch.cuda.synchronize()
@@ -132,14 +146,14 @@ class SimpleTrainer:
                 num_tiles_hit,
                 torch.sigmoid(self.rgbs),
                 torch.sigmoid(self.opacities),
-                self.H,
-                self.W,
+                H,
+                W,
                 B_SIZE,
                 self.background,
             )[..., :3]
             torch.cuda.synchronize()
             times[1] += time.time() - start
-            loss = mse_loss(out_img, self.gt_image)
+            loss = mse_loss(out_img, gt_image)
             optimizer.zero_grad()
             start = time.time()
             loss.backward()
@@ -147,6 +161,22 @@ class SimpleTrainer:
             times[2] += time.time() - start
             optimizer.step()
             print(f"Iteration {iter + 1}/{iterations}, Loss: {loss.item()}")
+
+            # with torch.no_grad():
+            #     # Densify
+            #     if self.yxz_grad_accum:
+            #         self.xyz_grad_accum += torch.norm(xys.grad[:2], dim=-1, keepdim=True)
+            #     else:
+            #         self.xyz_grad_accum = torch.norm(xys.grad[:2], dim=-1, keepdim=True)[:]
+            #     self.grad_denom += 1
+
+            #     if iter % 100 == 0:
+            #         grads = self.xyz_grad_accum / self.grad_denom
+            #         grads[grads.isnan()] = 0.0
+
+                    
+
+            #         torch.cuda.empty_cache()
 
             if save_imgs and iter % 5 == 0:
                 frames.append((out_img.detach().cpu().numpy() * 255).astype(np.uint8))
@@ -196,15 +226,7 @@ def main(
         False
     )
 
-    idx = 10
-
-    viewmat = torch.from_numpy(cameras[idx].w2c).to(dtype=torch.float)
-    fov_x = cameras[idx].FovX
-    W = cameras[idx].width
-    H = cameras[idx].height
-    gt_image = image_path_to_tensor(cameras[idx].image_path)
-
-    trainer = SimpleTrainer(gt_image=gt_image, fov_x=fov_x, W=W, H=H, viewmat=viewmat, num_points=num_points)
+    trainer = SimpleTrainer(cameras, num_points=num_points)
     trainer.train(
         iterations=iterations,
         lr=lr,
