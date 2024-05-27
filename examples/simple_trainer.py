@@ -12,6 +12,7 @@ from gsplat.rasterize import rasterize_gaussians
 from PIL import Image
 from torch import Tensor, optim
 
+from utils import readCamerasFromTransforms
 
 class SimpleTrainer:
     """Trains random gaussians to fit an image."""
@@ -19,25 +20,32 @@ class SimpleTrainer:
     def __init__(
         self,
         gt_image: Tensor,
+        fov_x,
+        W,
+        H,
+        viewmat,
         num_points: int = 2000,
     ):
         self.device = torch.device("cuda:0")
         self.gt_image = gt_image.to(device=self.device)
         self.num_points = num_points
 
-        fov_x = math.pi / 2.0
-        self.H, self.W = gt_image.shape[0], gt_image.shape[1]
+        fov_x = fov_x # math.pi / 2.0
+        self.H, self.W = H, W # gt_image.shape[0], gt_image.shape[1]
         self.focal = 0.5 * float(self.W) / math.tan(0.5 * fov_x)
         self.img_size = torch.tensor([self.W, self.H, 1], device=self.device)
+
+        self.viewmat = viewmat
 
         self._init_gaussians()
 
     def _init_gaussians(self):
         """Random gaussians"""
-        bd = 2
+        bd = 2.0
+        be = 0.001
 
         self.means = bd * (torch.rand(self.num_points, 3, device=self.device) - 0.5)
-        self.scales = torch.rand(self.num_points, 3, device=self.device)
+        self.scales = be * (torch.rand(self.num_points, 3, device=self.device))
         d = 3
         self.rgbs = torch.rand(self.num_points, d, device=self.device)
 
@@ -56,15 +64,16 @@ class SimpleTrainer:
         )
         self.opacities = torch.ones((self.num_points, 1), device=self.device)
 
-        self.viewmat = torch.tensor(
-            [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 8.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-            device=self.device,
-        )
+        # self.viewmat = torch.tensor(
+        #     [
+        #         [1.0, 0.0, 0.0, 0.0],
+        #         [0.0, 1.0, 0.0, 0.0],
+        #         [0.0, 0.0, 1.0, 9.0],
+        #         [0.0, 0.0, 0.0, 1.0],
+        #     ],
+        #     device=self.device,
+        # )
+        self.viewmat = self.viewmat.to(self.device)
         self.background = torch.zeros(d, device=self.device)
 
         self.means.requires_grad = True
@@ -180,15 +189,22 @@ def main(
     iterations: int = 1000,
     lr: float = 0.01,
 ) -> None:
-    if img_path:
-        gt_image = image_path_to_tensor(img_path)
-    else:
-        gt_image = torch.ones((height, width, 3)) * 1.0
-        # make top left and bottom right red, blue
-        gt_image[: height // 2, : width // 2, :] = torch.tensor([1.0, 0.0, 0.0])
-        gt_image[height // 2 :, width // 2 :, :] = torch.tensor([0.0, 0.0, 1.0])
+    cameras = readCamerasFromTransforms(
+        # './examples/nerf_example_data/nerf_synthetic/lego',
+        './nerf_example_data/nerf_synthetic/lego',
+        'transforms_train.json',
+        False
+    )
 
-    trainer = SimpleTrainer(gt_image=gt_image, num_points=num_points)
+    idx = 10
+
+    viewmat = torch.from_numpy(cameras[idx].w2c).to(dtype=torch.float)
+    fov_x = cameras[idx].FovX
+    W = cameras[idx].width
+    H = cameras[idx].height
+    gt_image = image_path_to_tensor(cameras[idx].image_path)
+
+    trainer = SimpleTrainer(gt_image=gt_image, fov_x=fov_x, W=W, H=H, viewmat=viewmat, num_points=num_points)
     trainer.train(
         iterations=iterations,
         lr=lr,
