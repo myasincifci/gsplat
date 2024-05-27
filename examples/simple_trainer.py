@@ -45,7 +45,7 @@ class SimpleTrainer:
     def _init_gaussians(self):
         """Random gaussians"""
         bd = 2.0
-        be = 0.001
+        be = 0.000001
 
         self.means = bd * (torch.rand(self.num_points, 3, device=self.device) - 0.5)
         self.scales = be * (torch.rand(self.num_points, 3, device=self.device))
@@ -94,10 +94,10 @@ class SimpleTrainer:
         save_imgs: bool = False,
         B_SIZE: int = 14,
     ):
-        optimizer = optim.AdamW(
+        optimizer = optim.Adam(
             [self.rgbs, self.means, self.scales, self.opacities, self.quats], lr
         )
-        mse_loss = torch.nn.MSELoss()
+        mse_loss = torch.nn.L1Loss()
         frames = []
         times = [0] * 3  # project, rasterize, backward
         B_SIZE = 16
